@@ -4,12 +4,13 @@ CPU 密集型基准测试：多进程并发计算目录下所有文件的 MD5，
 
 【功能】
   - 遍历指定目录下的文件，每个文件交给一个进程计算 MD5（ProcessPoolExecutor，绕过 GIL）。
-  - 测试 1～2×CPU 核数的进程数，绘制「进程数 vs 总耗时」曲线图。
-  - 支持在 CI（如 GitHub Actions）中自动生成测试数据（--generate），本机仅收集结果。
+  - 进程数从 1 测到 2×CPU 核数，绘制「进程数 vs 总耗时」曲线图。
+  - 本机：可指定几百～上千个文件、总大小十几 GB 以上的大目录（--input-dir）。
+  - CI：使用 --generate 生成测试数据，配合 --run-timeout 90 使主流程约 5 分钟内完成。
 
 【使用方法】
-  - 本机：指定大目录运行，或下载 Actions 产出的 artifact 查看结果。
-  - CI：在 workflow 中运行 python cpu_md5_benchmark.py --generate --output-dir ./results
+  - 本机大目录：python cpu_md5_benchmark.py --input-dir /path/to/large/dir
+  - CI（约 5 分钟）：python cpu_md5_benchmark.py --generate --generate-files 80 --generate-size-mb 0.5 --run-timeout 90
   - 收集结果：从 Actions 运行页下载「cpu-benchmark-results」artifact，解压即得 JSON + 曲线图。
 """
 import os
@@ -19,8 +20,10 @@ import time
 import hashlib
 import logging
 import argparse
+import platform
+import subprocess
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
 # 配置日志
 logging.basicConfig(
@@ -32,6 +35,39 @@ logger = logging.getLogger(__name__)
 
 # 单文件读块大小（字节）
 CHUNK_SIZE = 8192
+
+# 超时控制（秒）
+FILE_MD5_TIMEOUT = 120   # 单文件 MD5 计算超时
+RUN_TIMEOUT = 600        # 单轮（某进程数下）总超时，超时后跳过剩余文件并记录；CI 可传 --run-timeout 90 控制在约 5 分钟内
+
+
+def get_cpu_model():
+    """
+    获取当前 CPU 型号字符串（用于报告与日志）。
+    :return: CPU 型号描述，失败时返回 platform.processor() 或未知
+    """
+    try:
+        if sys.platform == "linux":
+            with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if line.strip().startswith("model name"):
+                        return line.split(":", 1)[1].strip()
+        elif sys.platform == "win32":
+            r = subprocess.run(
+                ["wmic", "cpu", "get", "name"],
+                capture_output=True, text=True, timeout=5, creationflags=0x08000000 if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            )
+            if r.returncode == 0 and r.stdout:
+                lines = [x.strip() for x in r.stdout.strip().splitlines() if x.strip() and x.strip().lower() != "name"]
+                if lines:
+                    return lines[0]
+        elif sys.platform == "darwin":
+            r = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout:
+                return r.stdout.strip()
+    except Exception as e:
+        logger.debug("获取 CPU 型号失败: %s", e)
+    return platform.processor() or "未知"
 
 
 def _compute_file_md5(filepath):
@@ -69,15 +105,19 @@ def _collect_files(root_dir):
     return files
 
 
-def run_benchmark(file_list, process_counts=None, output_dir=None, do_plot=True):
+def run_benchmark(file_list, process_counts=None, output_dir=None, do_plot=True, run_timeout=None, file_timeout=None):
     """
     对给定进程数列表依次运行多进程 MD5 计算，并可选绘图。
     :param file_list: 文件路径列表
     :param process_counts: 进程数列表，默认 [1, 2, 4, ..., 2*cpu_count]
     :param output_dir: 结果与图片保存目录
     :param do_plot: 是否绘制进程数-耗时曲线图
+    :param run_timeout: 单轮总超时（秒），None 则用 RUN_TIMEOUT；CI 可传 90 使主流程约 5 分钟内完成
+    :param file_timeout: 单文件 MD5 超时（秒），None 则用 FILE_MD5_TIMEOUT
     :return: [(process_count, total_time_seconds, file_count), ...]
     """
+    run_limit = run_timeout if run_timeout is not None else RUN_TIMEOUT
+    file_limit = file_timeout if file_timeout is not None else FILE_MD5_TIMEOUT
     n_cpu = os.cpu_count() or 4
     if process_counts is None:
         process_counts = []
@@ -97,17 +137,30 @@ def run_benchmark(file_list, process_counts=None, output_dir=None, do_plot=True)
     for n_proc in process_counts:
         start = time.perf_counter()
         done = 0
+        timeout_count = 0
+        run_timed_out = False
         with ProcessPoolExecutor(max_workers=n_proc) as executor:
             futures = {executor.submit(_compute_file_md5, f): f for f in file_list}
             for future in as_completed(futures):
-                r = future.result()
+                if time.perf_counter() - start > run_limit:
+                    run_timed_out = True
+                    logger.warning("单轮超时（%s 秒），进程数=%s，已跳过剩余任务", run_limit, n_proc)
+                    break
+                try:
+                    r = future.result(timeout=file_limit)
+                except FuturesTimeoutError:
+                    timeout_count += 1
+                    logger.warning("单文件超时（%s 秒）: %s", file_limit, futures.get(future, "?"))
+                    continue
                 if len(r) == 2:
                     done += 1
                 else:
                     logger.warning("文件 %s 失败: %s", r[0], r[2])
         total_time = time.perf_counter() - start
         results.append((n_proc, total_time, len(file_list), done))
-        logger.info("进程数=%s，总耗时=%.2f s，成功=%s/%s", n_proc, total_time, done, len(file_list))
+        logger.info("进程数=%s，总耗时=%.2f s，成功=%s/%s，超时=%s%s",
+                    n_proc, total_time, done, len(file_list), timeout_count,
+                    "（已提前结束）" if run_timed_out else "")
 
     if do_plot and results and output_dir:
         _plot_curve(results, output_dir)
@@ -196,6 +249,10 @@ def main():
     parser.add_argument("--generate-size-mb", type=int, default=1, help="--generate 时每个文件大小(MB)")
     parser.add_argument("--process-counts", type=str, default="",
                         help="逗号分隔的进程数，如 1,2,4,8；默认 1,2,4,...,2*cpu_count")
+    parser.add_argument("--run-timeout", type=int, default=None,
+                        help="单轮总超时（秒），CI 可传 90 使主流程约 5 分钟内完成")
+    parser.add_argument("--file-timeout", type=int, default=None,
+                        help="单文件 MD5 超时（秒）")
     parser.add_argument("--no-plot", action="store_true", help="不绘制曲线图")
     args = parser.parse_args()
 
@@ -216,6 +273,8 @@ def main():
     if not file_list:
         logger.error("未找到任何文件")
         sys.exit(1)
+    cpu_model = get_cpu_model()
+    logger.info("测试 CPU: %s（逻辑核数: %s）", cpu_model, os.cpu_count())
     logger.info("共 %s 个文件，总大小约 %.2f MB", len(file_list),
                 sum(os.path.getsize(f) for f in file_list) / (1024 * 1024))
 
@@ -231,11 +290,15 @@ def main():
         file_list,
         process_counts=process_counts,
         output_dir=output_dir,
-        do_plot=not args.no_plot
+        do_plot=not args.no_plot,
+        run_timeout=args.run_timeout,
+        file_timeout=args.file_timeout
     )
 
-    # 写出 JSON 报告（供本机收集）
+    # 写出 JSON 报告（供本机收集），含 CPU 型号
+    cpu_model = get_cpu_model()
     report = {
+        "cpu_model": cpu_model,
         "cpu_count": os.cpu_count(),
         "file_count": len(file_list),
         "total_size_mb": round(sum(os.path.getsize(f) for f in file_list) / (1024 * 1024), 2),
