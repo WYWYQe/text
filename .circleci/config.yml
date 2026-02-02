@@ -34,7 +34,7 @@ jobs:
               --generate-files 50 \
               --generate-size-mb 0.5 \
               --run-timeout 60
-              --process-counts 1,2,4,8,16,32
+              --process-counts 1,2,4,8,16
 
       - store_artifacts:
           path: cpu_benchmark_results
