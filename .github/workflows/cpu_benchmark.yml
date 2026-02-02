@@ -1,4 +1,5 @@
 # CPU 密集型基准测试：在 GitHub Actions 上运行多进程 MD5 测试，本机仅收集结果
+# 若出现 "The operation was canceled"：多为手动取消、超时或并发取消，见 scripts/collect_cpu_benchmark.md
 name: CPU 密集型基准测试
 
 on:
@@ -9,6 +10,8 @@ on:
 jobs:
   cpu-benchmark:
     runs-on: ubuntu-latest
+    # 显式超时，避免长时间挂起；超时也会显示为 canceled
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,12 +24,24 @@ jobs:
       - name: Install matplotlib（绘图）
         run: pip install matplotlib
 
+      - name: 显示 Runner CPU 型号（供统计）
+        run: |
+          echo "## Runner CPU 信息" >> $GITHUB_STEP_SUMMARY
+          if [ -f /proc/cpuinfo ]; then
+            CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2- | xargs || echo "未知")
+            echo "**CPU 型号:** $CPU_MODEL" >> $GITHUB_STEP_SUMMARY
+            echo "CPU 型号: $CPU_MODEL"
+          else
+            echo "**CPU 型号:** 无法读取（非 Linux Runner）" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "逻辑核数: $(nproc 2>/dev/null || echo '?')" >> $GITHUB_STEP_SUMMARY
+
       - name: 运行 CPU 密集型 MD5 基准测试
         run: |
           python cpu_md5_benchmark.py \
             --generate \
             --output-dir ./cpu_benchmark_results \
-            --generate-files 200 \
+            --generate-files 100 \
             --generate-size-mb 1
 
       - name: 上传结果 Artifact（供本机收集）
@@ -41,9 +56,14 @@ jobs:
           echo "## CPU 基准测试结果" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ -f cpu_benchmark_results/cpu_md5_report.json ]; then
+            CPU_MODEL=$(python3 -c "import json; d=json.load(open('cpu_benchmark_results/cpu_md5_report.json')); print(d.get('cpu_model','未记录'))" 2>/dev/null || true)
+            CPU_COUNT=$(python3 -c "import json; d=json.load(open('cpu_benchmark_results/cpu_md5_report.json')); print(d.get('cpu_count','?'))" 2>/dev/null || true)
+            echo "**测试 CPU 型号（脚本统计）:** $CPU_MODEL" >> $GITHUB_STEP_SUMMARY
+            echo "**逻辑核数:** $CPU_COUNT" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
             echo '```json' >> $GITHUB_STEP_SUMMARY
             cat cpu_benchmark_results/cpu_md5_report.json >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "请从本页 **Artifacts** 下载 \`cpu-benchmark-results\` 获取 JSON 报告与曲线图。" >> $GITHUB_STEP_SUMMARY
+          echo "请从本页 **Artifacts** 下载 \`cpu-benchmark-results\` 获取 JSON 报告与曲线图（报告内含 \`cpu_model\` 字段）。" >> $GITHUB_STEP_SUMMARY
