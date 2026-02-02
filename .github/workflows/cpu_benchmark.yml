@@ -1,0 +1,49 @@
+# CPU 密集型基准测试：在 GitHub Actions 上运行多进程 MD5 测试，本机仅收集结果
+name: CPU 密集型基准测试
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:   # 支持手动触发
+
+jobs:
+  cpu-benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install matplotlib（绘图）
+        run: pip install matplotlib
+
+      - name: 运行 CPU 密集型 MD5 基准测试
+        run: |
+          python cpu_md5_benchmark.py \
+            --generate \
+            --output-dir ./cpu_benchmark_results \
+            --generate-files 200 \
+            --generate-size-mb 1
+
+      - name: 上传结果 Artifact（供本机收集）
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-benchmark-results
+          path: cpu_benchmark_results/
+          retention-days: 30
+
+      - name: 输出摘要
+        run: |
+          echo "## CPU 基准测试结果" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f cpu_benchmark_results/cpu_md5_report.json ]; then
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat cpu_benchmark_results/cpu_md5_report.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "请从本页 **Artifacts** 下载 \`cpu-benchmark-results\` 获取 JSON 报告与曲线图。" >> $GITHUB_STEP_SUMMARY
