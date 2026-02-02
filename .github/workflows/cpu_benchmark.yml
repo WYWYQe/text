@@ -10,8 +10,8 @@ on:
 jobs:
   cpu-benchmark:
     runs-on: ubuntu-latest
-    # 显式超时，避免长时间挂起；超时也会显示为 canceled
-    timeout-minutes: 25
+    # 主流程目标约 5 分钟；job 总超时 8 分钟留余量
+    timeout-minutes: 8
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,13 +36,14 @@ jobs:
           fi
           echo "逻辑核数: $(nproc 2>/dev/null || echo '?')" >> $GITHUB_STEP_SUMMARY
 
-      - name: 运行 CPU 密集型 MD5 基准测试
+      - name: 运行 CPU 密集型 MD5 基准测试（约 5 分钟内完成）
         run: |
           python cpu_md5_benchmark.py \
             --generate \
             --output-dir ./cpu_benchmark_results \
-            --generate-files 100 \
-            --generate-size-mb 1
+            --generate-files 80 \
+            --generate-size-mb 0.5 \
+            --run-timeout 90
 
       - name: 上传结果 Artifact（供本机收集）
         uses: actions/upload-artifact@v4
