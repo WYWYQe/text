@@ -1,0 +1,46 @@
+# CPU 密集型基准测试：在 CircleCI 上运行多进程 MD5 测试，本机从 Artifacts 收集结果
+# 文档：https://circleci.com/docs/config-intro
+version: 2.1
+
+jobs:
+  cpu-benchmark:
+    docker:
+      - image: cimg/python:3.11
+    resource_class: medium  # 可选：small/medium/large，控制 CPU/内存
+    steps:
+      - checkout
+
+      - run:
+          name: 安装 matplotlib（绘图）
+          command: pip install matplotlib
+
+      - run:
+          name: 显示 Runner CPU 型号（供统计）
+          command: |
+            echo "=== Runner CPU 信息 ==="
+            if [ -f /proc/cpuinfo ]; then
+              grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2- | xargs || echo "未知"
+              echo "逻辑核数: $(nproc 2>/dev/null || echo '?')"
+            else
+              echo "无法读取（非 Linux）"
+            fi
+
+      - run:
+          name: 运行 CPU 密集型 MD5 基准测试（约 4 分钟内完成）
+          command: |
+            python cpu_md5_benchmark.py \
+              --generate \
+              --output-dir ./cpu_benchmark_results \
+              --generate-files 50 \
+              --generate-size-mb 0.5 \
+              --run-timeout 60
+
+      - store_artifacts:
+          path: cpu_benchmark_results
+          destination: cpu-benchmark-results
+
+workflows:
+  version: 2
+  benchmark:
+    jobs:
+      - cpu-benchmark
