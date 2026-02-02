@@ -221,7 +221,7 @@ def generate_test_files(output_dir, num_files=200, file_size_mb=1):
     """
     os.makedirs(output_dir, exist_ok=True)
     chunk = b"x" * 1024 * 1024  # 1MB
-    to_write = file_size_mb * 1024 * 1024
+    to_write = int(file_size_mb * 1024 * 1024)  # 支持小数 MB（如 0.5）
     written = 0
     for i in range(num_files):
         path = os.path.join(output_dir, f"test_{i:05d}.bin")
@@ -246,7 +246,7 @@ def main():
     parser.add_argument("--generate", action="store_true",
                         help="在 output-dir 下生成测试文件（供 CI 使用），再跑基准测试")
     parser.add_argument("--generate-files", type=int, default=200, help="--generate 时生成的文件数")
-    parser.add_argument("--generate-size-mb", type=int, default=1, help="--generate 时每个文件大小(MB)")
+    parser.add_argument("--generate-size-mb", type=float, default=1.0, help="--generate 时每个文件大小(MB)，可为小数如 0.5")
     parser.add_argument("--process-counts", type=str, default="",
                         help="逗号分隔的进程数，如 1,2,4,8；默认 1,2,4,...,2*cpu_count")
     parser.add_argument("--run-timeout", type=int, default=None,
